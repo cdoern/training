@@ -22,9 +22,13 @@ from tqdm import tqdm
 from transformers import (
     Adafactor,
     AutoModelForCausalLM,
+    AutoConfig,
     LlamaForCausalLM,
+    LlamaTokenizer,
+    PreTrainedModel,
     get_scheduler,
 )
+from torch import autocast, GradScaler
 import deepspeed
 import torch
 import torch.distributed
@@ -59,6 +63,35 @@ from instructlab.training.utils import (
     setup_logger,
 )
 import instructlab.training.data_process as dp
+
+
+class SimpleCasualLMModel(LlamaForCausalLM):
+    def __init__(self, config, device):
+        super().__init__(config)
+        # Move the model to MPS device if available
+        self.to(device)
+
+
+    def forward(self, input_ids, attention_mask=None, **kwargs):
+        input_ids = input_ids.to(self.device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.device)
+        
+        # Mixed precision context
+        #with autocast(device_type=self.device.type):
+        outputs = super().forward(input_ids, attention_mask=attention_mask, **kwargs)
+        return outputs
+
+    def backward(self, loss):
+        loss = loss.to(self.device)
+        # Scale the loss for mixed precision training
+        loss.backward()
+
+    def step(self, optimizer):
+        # Apply the gradients using the scaler
+        optimizer.step()
+        optimizer.zero_grad()
+
 
 
 def get_ds_config(world_size, samples_per_gpu, grad_accum, opts: DeepSpeedOptions):
@@ -281,7 +314,9 @@ def setup_model(args, tokenizer, train_loader, grad_accum, device):
         # If we are using CPU or MPS just place model on that device
         # also, initialize Adafactor, a Transformers Optimizer designed to use less resources.
         # if we use AdamW here most people will always run out of RAM
-        model = model.to(device)
+        cfg = AutoConfig.from_pretrained(args.model_name_or_path)
+        model = SimpleCasualLMModel(cfg, device)
+      #  model = model.to(device)
         optimizer = Adafactor(
             model.parameters(), lr=1e-5, scale_parameter=True, relative_step=False
         )
@@ -444,9 +479,8 @@ def train(
                 model.backward(loss)
                 model.step()
             else:
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                model.backward(loss)
+                model.step(optimizer)
 
             if local_rank == 0:
                 elapsed_time = time.time() - start
