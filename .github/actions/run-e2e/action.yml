@@ -153,7 +153,7 @@ runs:
         . venv/bin/activate
 
         # set preserve to true so we can retain the logs
-        ./scripts/e2e-ci.sh -lp
+        ${{ inputs.script }}
 
         # we know that the file will be named something like f"/training_params_and_metrics_global{os.environ['RANK']}.jsonl" in python
         # and we know that it will be written into a directory created by `mktemp -d`. 
